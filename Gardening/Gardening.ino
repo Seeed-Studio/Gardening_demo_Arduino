@@ -1,5 +1,4 @@
-// Example testing sketch for various DHT humidity/temperature sensors
-// Written by ladyada, public domain
+// This is a Gardening demo for Arduino writen by Jiankai.li
 
 #include <Wire.h>
 #include <SeeedOLED.h>
