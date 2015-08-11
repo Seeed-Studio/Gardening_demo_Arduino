@@ -1,11 +1,40 @@
-// This is a Gardening demo for Arduino writen by Jiankai.li
-
+/*    
+ * Gardening.c
+ * Gardening Demo for Arduino 
+ *   
+ * Copyright (c) 2015 seeed technology inc.  
+ * Author      : Jiankai.li  
+ * Create Time:  Aug 2015
+ * Change Log : 
+ *
+ * The MIT License (MIT)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 #include <Wire.h>
 #include <SeeedOLED.h>
+#include <EEPROM.h>
 #include "DHT.h"
 #include <TimerOne.h>
 #include "Arduino.h"
 #include "SI114X.h"
+
 
 
 enum Status 
@@ -34,6 +63,7 @@ enum WarningStatus
     AirHumitityWarning = 1,
     AirTemperWarning   = 2,
     UVIndexWarning     = 3,
+    NoWaterWarning     = 4,
 };
 typedef enum WarningStatus WarningStatusType;
 WarningStatusType SystemWarning;
@@ -41,16 +71,16 @@ WarningStatusType SystemWarning;
 
 struct Limens 
 {
-    unsigned char UVIndex_Limen       = 5;
-    unsigned char DHTHumidity_Limen   = 0;
-    unsigned char DHTTemperature_Hi   = 32;
-    unsigned char DHTTemperature_Low  = 0;
-    unsigned char MoisHumidity_Limen  = 0;
-    float         WaterVolume         = 1;
+    unsigned char UVIndex_Limen       = 9;
+    unsigned char DHTHumidity_Hi      = 60;
+    unsigned char DHTHumidity_Low     = 40;
+    unsigned char DHTTemperature_Hi   = 30;
+    unsigned char DHTTemperature_Low  = 15;
+    unsigned char MoisHumidity_Limen  = 90;
+    float         WaterVolume         = 0.2;
 };
 typedef struct Limens WorkingLimens;
 WorkingLimens SystemLimens;
-
 
 #define DHTPIN          A0     // what pin we're connected to
 #define MoisturePin     A1
@@ -64,11 +94,14 @@ WorkingLimens SystemLimens;
 #define WaterflowPin    5
 #define RelayPin        6
 
-#define DataUpdateInterval 20000  // 10S
+#define OneSecond       1000
+#define DataUpdateInterval 20000  // 20S
 #define RelayOn         HIGH
 #define RelayOff        LOW
 
-#define OneSecond       1000
+#define NoWaterTimeOut  3        // 10s
+
+unsigned int  uiWaterVolume = 0;
 unsigned char WaterflowFlag = 0;
 unsigned int  WaterflowRate = 0;  // L/Hour
 unsigned int  NbTopsFan     = 0;  // count the edges
@@ -79,7 +112,10 @@ unsigned char ButtonFlag  = 0;
 signed   char LCDPage     = 4;
 unsigned char SwitchtoWateringFlag = 0;
 unsigned char SwitchtoWarningFlag  = 0;
+unsigned char SwitchtoStandbyFlag  = 0;
+unsigned char UpdateDataFlag  = 0;
 unsigned char ButtonIndex = 0;
+unsigned char EEPROMAddress = 0;
 float Volume     = 0;
 unsigned long counter = 0;
 
@@ -90,6 +126,7 @@ float DHTTemperature = 0;
 float MoisHumidity   = 0;
 float UVIndex        = 0;
 char buffer[30];
+
 void setup() 
 {
     /* Init OLED */
@@ -116,12 +153,10 @@ void setup()
     attachInterrupt(1,EncoderRotate,RISING);   
 
     /* Init UV */
-    Serial.println("Beginning Si1145!");
     while (!SI1145.Begin()) {
-        Serial.println("Si1145 is not ready!");
         delay(1000);
     }
-    Serial.println("Si1145 is ready!");
+
     
     /* Init Water flow */
     pinMode(WaterflowPin,INPUT);
@@ -129,10 +164,33 @@ void setup()
     /* Init Relay      */
     pinMode(RelayPin,OUTPUT);
     
+    /* The First time power on to write the default data to EEPROM */
+    if (EEPROM.read(EEPROMAddress) == 0xff) {
+        EEPROM.write(EEPROMAddress,0x00);
+        EEPROM.write(++EEPROMAddress,SystemLimens.UVIndex_Limen);
+        EEPROM.write(++EEPROMAddress,SystemLimens.DHTHumidity_Hi);
+        EEPROM.write(++EEPROMAddress,SystemLimens.DHTHumidity_Low);
+        EEPROM.write(++EEPROMAddress,SystemLimens.DHTTemperature_Hi);
+        EEPROM.write(++EEPROMAddress,SystemLimens.DHTTemperature_Low);
+        EEPROM.write(++EEPROMAddress,SystemLimens.MoisHumidity_Limen);
+        EEPROM.write(++EEPROMAddress,((int)(SystemLimens.WaterVolume*100))/255);    /*  */
+        EEPROM.write(++EEPROMAddress,((int)(SystemLimens.WaterVolume*100))%255);
+    } else { /* If It's the first time power on , read the last time data */
+        EEPROMAddress++;
+        SystemLimens.UVIndex_Limen      = EEPROM.read(EEPROMAddress++);
+        SystemLimens.DHTHumidity_Hi     = EEPROM.read(EEPROMAddress++);
+        SystemLimens.DHTHumidity_Low    = EEPROM.read(EEPROMAddress++);
+        SystemLimens.DHTTemperature_Hi  = EEPROM.read(EEPROMAddress++);
+        SystemLimens.DHTTemperature_Low = EEPROM.read(EEPROMAddress++);
+        SystemLimens.MoisHumidity_Limen = EEPROM.read(EEPROMAddress++);
+        SystemLimens.WaterVolume =   (EEPROM.read(EEPROMAddress++)*255 + EEPROM.read(EEPROMAddress))/100.0;
+    }
+    
     StartTime = millis();
     WorkingStatus = Standby;
     SystemWarning = NoWarning;
 }
+
 
 void loop() 
 {
@@ -145,15 +203,14 @@ void loop()
             DHTHumidity    = dht.readHumidity();
             DHTTemperature = dht.readTemperature();
             MoisHumidity   = analogRead(MoisturePin)/7;
-            UVIndex        = (float)SI1145.ReadUV()/100;
+            UVIndex        = (float)SI1145.ReadUV()/100 + 0.5;
             if (MoisHumidity >100) {
                 MoisHumidity = 100;
             }
             if (MoisHumidity < SystemLimens.MoisHumidity_Limen) {
                 SwitchtoWateringFlag = 1;
-            }
-            
-            if (DHTHumidity < SystemLimens.DHTHumidity_Limen) {
+            }  
+            if (DHTHumidity < SystemLimens.DHTHumidity_Low || DHTHumidity > SystemLimens.DHTHumidity_Hi) {  /* DHTHumidity anomaly */
                 SystemWarning = AirHumitityWarning;
             }
             else if ((DHTTemperature>SystemLimens.DHTTemperature_Hi) || (DHTTemperature < SystemLimens.DHTTemperature_Low)) {
@@ -161,6 +218,9 @@ void loop()
             }
             else if (UVIndex > SystemLimens.UVIndex_Limen) {
                 SystemWarning = UVIndexWarning;
+            }
+            else if (SystemWarning == NoWaterWarning) {
+                SystemWarning = NoWaterWarning;
             }
             else {
                 SystemWarning = NoWarning;
@@ -188,6 +248,7 @@ void loop()
                 }
                 SeeedOled.clearDisplay(); 
             }
+            
             switch (LCDPage) {
             case 0:
                 DisplayMoisture();
@@ -210,9 +271,23 @@ void loop()
             default:
                 break;
             }
+            
+            if (UpdateDataFlag == 1) {
+                UpdateDataFlag = 0;
+                EEPROMAddress  = 0;
+                EEPROM.write(++EEPROMAddress,SystemLimens.UVIndex_Limen);
+                EEPROM.write(++EEPROMAddress,SystemLimens.DHTHumidity_Hi);
+                EEPROM.write(++EEPROMAddress,SystemLimens.DHTHumidity_Low);
+                EEPROM.write(++EEPROMAddress,SystemLimens.DHTTemperature_Hi);
+                EEPROM.write(++EEPROMAddress,SystemLimens.DHTTemperature_Low);
+                EEPROM.write(++EEPROMAddress,SystemLimens.MoisHumidity_Limen);
+                EEPROM.write(++EEPROMAddress,((int)(SystemLimens.WaterVolume*100))/255);    /*  */
+                EEPROM.write(++EEPROMAddress,((int)(SystemLimens.WaterVolume*100))%255);
+            }
+            
             if (ButtonFlag == 1) {
                 if ((int)(LCDPage) == 4) {
-                    StandbytoWatering();         
+                    StandbytoWatering();    
                 } 
                 if(ButtonIndex == 1) {
                     ButtonIndex = 0;
@@ -231,24 +306,37 @@ void loop()
         }
         break;
     case Warning:
+        SeeedOled.setTextXY(2,4);
+        SeeedOled.putString("Warning!");
         switch (SystemWarning) {
         case AirHumitityWarning:
-                SeeedOled.setTextXY(3,3);
-                SeeedOled.putString("AirHumitity");
-                SeeedOled.setTextXY(5,4);
-                SeeedOled.putString("Warning");
+            if (DHTHumidity < SystemLimens.DHTHumidity_Low ) {
+                SeeedOled.setTextXY(5,2);
+                SeeedOled.putString("Humitity  Low");
+            } else {
+                SeeedOled.setTextXY(5,2);
+                SeeedOled.putString("Humitity High");
+            }
             break;
         case AirTemperWarning:
-                SeeedOled.setTextXY(3,3);
-                SeeedOled.putString("AirTemper");
-                SeeedOled.setTextXY(5,4);
-                SeeedOled.putString("Warning");             
+            if (DHTTemperature < SystemLimens.DHTTemperature_Low) {
+                SeeedOled.setTextXY(5,3);
+                SeeedOled.putString("Temp  Low");
+            } else {
+                SeeedOled.setTextXY(5,3);
+                SeeedOled.putString("Temp High");
+            }                
             break;
         case UVIndexWarning:
-                SeeedOled.setTextXY(3,4);
-                SeeedOled.putString("UVIndex");
+            if (DHTTemperature > SystemLimens.UVIndex_Limen) {
                 SeeedOled.setTextXY(5,4);
-                SeeedOled.putString("Warning");
+                SeeedOled.putString("UV   High");
+            } else {
+            }
+            break;
+        case NoWaterWarning:
+                SeeedOled.setTextXY(5,3);
+                SeeedOled.putString("No  Water");
             break;
         }
         delay(1000);
@@ -262,7 +350,6 @@ void loop()
         }
         break;
     case Setting:
-        Serial.println("Setting");
         if (ButtonFlag == 1) {
             ButtonFlag = 0;
             WorkingStatus = Watering;
@@ -271,6 +358,8 @@ void loop()
         }
         break;
     case Watering:
+        SwitchtoWarningFlag = 0;
+        SeeedOled.setNormalDisplay();
         if(digitalRead(WaterflowPin) == 1) {
             if(digitalRead(WaterflowPin) == 1) {
                 if (WaterflowFlag == 0) {
@@ -285,24 +374,39 @@ void loop()
             } else {
             }
         }
+        static char NoWaterTime = 0;
         if ((millis() - StartTime) > OneSecond ) {
             WaterflowRate = (NbTopsFan*60 / 73);
-            Volume       += (float)((float)(NbTopsFan) / 73/60 + 0.005);           
+            if(((float)(NbTopsFan) / 73/60) < 0.005 ) {
+                if(NoWaterTime++ >= NoWaterTimeOut) {
+                    NoWaterTime = 0;
+                    SystemWarning = NoWaterWarning;
+                    SwitchtoWarningFlag = 1;
+                }
+                Volume       += (float)((float)(NbTopsFan) / 73/60);
+            } else {
+                NoWaterTime = 0;
+                SystemWarning = NoWarning;
+                SwitchtoWarningFlag = 0;
+                Volume       += (float)((float)(NbTopsFan) / 73/60 + 0.005);
+            }
+           
             NbTopsFan = 0;
             sprintf(buffer,"%2d L/H",WaterflowRate);
             SeeedOled.setTextXY(2,10);
             SeeedOled.putString(buffer);  
-            
-            sprintf(buffer,"%2d.%2d L",(int)(Volume),(int)((int)(Volume*100) %100));
+            if ((int)((int)(Volume*100) %100) < 10 ) {
+                sprintf(buffer,"%2d.0%d L",(int)(Volume),(int)((int)(Volume*100) %100));
+            } else {
+                sprintf(buffer,"%2d.%2d L",(int)(Volume),(int)((int)(Volume*100) %100));
+            }
+            //sprintf(buffer,"%2d.%2d L",(int)(Volume),(int)((int)(Volume*100) %100));
             SeeedOled.setTextXY(4,8);
             SeeedOled.putString(buffer);  
             
+            
             if (Volume >= SystemLimens.WaterVolume) {
-                Volume = 0;
-                WorkingStatus = Standby;
-                WaterPumpOff();
-                SeeedOled.clearDisplay();
-                LCDPage = 4;
+                SwitchtoStandbyFlag = 1;
             }
 //            
             // sprintf(buffer,"Press Btn toSTOP");
@@ -311,13 +415,27 @@ void loop()
             StartTime = millis();
         }
         if (ButtonFlag == 1) {
-            Volume = 0;
             ButtonFlag = 0;
+            SwitchtoStandbyFlag = 1;
+        }  
+        if (SwitchtoStandbyFlag == 1) {
+            Volume = 0;
+            WorkingStatus = Standby;
             SeeedOled.clearDisplay();
             StartTime = millis();
-            WorkingStatus = Standby;
+            LCDPage = 4;
+            SwitchtoStandbyFlag = 0;
             WaterPumpOff();
-        }     
+        } 
+        if (SwitchtoWarningFlag == 1) {
+            Volume = 0;
+            SwitchtoWarningFlag = 0;
+            WorkingStatus = Warning;
+            StartTime = millis();
+            WaterPumpOff();
+            SeeedOled.clearDisplay();
+            SeeedOled.setInverseDisplay();
+        }
         break;
     default:
         break;
@@ -337,20 +455,21 @@ void WaterPumpOff()
 
 void DisplayUVIndex()
 {
-    sprintf(buffer,"UVIndex");
-    SeeedOled.setTextXY(0,0);          //Set the cursor to Xth Page, Yth Column  
+    sprintf(buffer,"UV Index");
+    SeeedOled.setTextXY(1,4);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
 
-    sprintf(buffer,"%d.%d",(int)(UVIndex),(int)((int)(UVIndex*100) % 100));
-    SeeedOled.setTextXY(1,5);          //Set the cursor to Xth Page, Yth Column  
+    sprintf(buffer,"%d",(int)(UVIndex));
+    SeeedOled.setTextXY(2,7);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
-    sprintf(buffer,"Limen:"); 
-
-    SeeedOled.setTextXY(6,0);
+    
+    sprintf(buffer,"Safe Vaule");
+    SeeedOled.setTextXY(5,3);
     SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,5);
-    sprintf(buffer,"%d.00",(int)(SystemLimens.UVIndex_Limen)); 
-            
+    
+    sprintf(buffer,"%2d",(int)(SystemLimens.UVIndex_Limen)); 
+    SeeedOled.setTextXY(6,7);
+    
     SeeedOled.putString(buffer);
     
     if (digitalRead(ButtonPin) == 1) {
@@ -358,6 +477,7 @@ void DisplayUVIndex()
         if (EncoderFlag == 1) {
         delay(100);
         EncoderFlag = 0;
+        UpdateDataFlag  = 1;
         switch(EncoderRoateDir) {
         case Clockwise:
             SystemLimens.UVIndex_Limen++;
@@ -368,8 +488,8 @@ void DisplayUVIndex()
         default:
             break;
             }
-        if (SystemLimens.UVIndex_Limen > 12) {
-            SystemLimens.UVIndex_Limen = 12;
+        if (SystemLimens.UVIndex_Limen > 15) {
+            SystemLimens.UVIndex_Limen = 15;
         }
         if (SystemLimens.UVIndex_Limen <= 0) {
             SystemLimens.UVIndex_Limen = 0;
@@ -382,102 +502,117 @@ void DisplayUVIndex()
 
 void DisplayAirHumitity()
 {
-    sprintf(buffer,"AirHumitity:");
-    SeeedOled.setTextXY(0,0);          //Set the cursor to Xth Page, Yth Column  
+    sprintf(buffer,"Humitity");
+    SeeedOled.setTextXY(1,4);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
 
     sprintf(buffer,"%d.%d%%",(int)(DHTHumidity),(int)((int)(DHTHumidity*100) % 100));
-    SeeedOled.setTextXY(1,5);          //Set the cursor to Xth Page, Yth Column  
+    SeeedOled.setTextXY(2,6);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
     
-    SeeedOled.setTextXY(5,0);
-    SeeedOled.putString("Low ");
-    
-    sprintf(buffer,"Limen:"); 
-    SeeedOled.setTextXY(6,0);
+    sprintf(buffer,"<Safe Value<"); 
+    SeeedOled.setTextXY(5,2);
     SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,2);
-    sprintf(buffer,"%d.00",(int)(SystemLimens.DHTHumidity_Limen)); 
+    
+    sprintf(buffer,"%2d.0%%",(int)(SystemLimens.DHTHumidity_Low)); 
+    SeeedOled.setTextXY(7,0);
+    SeeedOled.putString(buffer); 
+    
+    sprintf(buffer,"%2d.0%%",(int)(SystemLimens.DHTHumidity_Hi)); 
+    SeeedOled.setTextXY(7,10);
+    SeeedOled.putString(buffer);
+    
+    if(ButtonIndex == 0) {
+        sprintf(buffer,"Low<--     High"); 
+        SeeedOled.setTextXY(6,1);
+        SeeedOled.putString(buffer);
+        if (digitalRead(ButtonPin) == 1) {
+            Serial.println("BUTTON");
+            if (EncoderFlag == 1) {
+                delay(100);
+                EncoderFlag = 0;
+                UpdateDataFlag  = 1;
+                switch(EncoderRoateDir) {
+                case Clockwise:
+                    SystemLimens.DHTHumidity_Low++;
+                    break;
+                case Anticlockwise:
+                    SystemLimens.DHTHumidity_Low--;
+                    break;
+                default:
+                    break;
+                }
+                if (SystemLimens.DHTHumidity_Low > SystemLimens.DHTHumidity_Hi) {
+                    SystemLimens.DHTHumidity_Low = SystemLimens.DHTHumidity_Hi;
+                }
+                if (SystemLimens.DHTHumidity_Low <= 0) {
+                    SystemLimens.DHTHumidity_Low = 0;
+                }
+            } 
+        }
+    } else {
+        sprintf(buffer,"Low     -->High"); 
+        SeeedOled.setTextXY(6,1);
+        SeeedOled.putString(buffer);
+        if (digitalRead(ButtonPin) == 1) {
 
-    SeeedOled.putString(buffer);
-    
-    if (digitalRead(ButtonPin) == 1) {
-        Serial.println("BUTTON");
-        if (EncoderFlag == 1) {
-        delay(100);
-        EncoderFlag = 0;
-        switch(EncoderRoateDir) {
-        case Clockwise:
-            SystemLimens.DHTHumidity_Limen++;
-            break;
-        case Anticlockwise:
-            SystemLimens.DHTHumidity_Limen--;
-            break;
-        default:
-            break;
-            }
-        if (SystemLimens.DHTHumidity_Limen > 100) {
-            SystemLimens.DHTHumidity_Limen = 0;
+            Serial.println("BUTTON");
+            if (EncoderFlag == 1) {
+                delay(100);
+                EncoderFlag = 0;
+                UpdateDataFlag  = 1;
+                switch(EncoderRoateDir) {
+                case Clockwise:
+                    SystemLimens.DHTHumidity_Hi++;
+                    break;
+                case Anticlockwise:
+                    SystemLimens.DHTHumidity_Hi--;
+                    break;
+                default:
+                    break;
+                }
+                if (SystemLimens.DHTHumidity_Hi > 100) {
+                    SystemLimens.DHTHumidity_Hi = 100;
+                }
+                if (SystemLimens.DHTHumidity_Hi <= SystemLimens.DHTHumidity_Low) {
+                    SystemLimens.DHTHumidity_Hi = SystemLimens.DHTHumidity_Low;
+                }
+            } 
         }
-        if (SystemLimens.DHTHumidity_Limen < 0) {
-            SystemLimens.DHTHumidity_Limen = 100;
-        }
-        } 
     }
 }
 
 void DisplayAirTemp()
 {
-    sprintf(buffer,"AirTemper:");
-    SeeedOled.setTextXY(0,0);          //Set the cursor to Xth Page, Yth Column  
+    sprintf(buffer,"Temperature");
+    SeeedOled.setTextXY(1,2);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
 
     sprintf(buffer,"%d.%d*C",(int)(DHTTemperature),(int)((int)(DHTTemperature*100)%100));
-    SeeedOled.setTextXY(1,5);          //Set the cursor to Xth Page, Yth Column  
+    SeeedOled.setTextXY(2,5);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
-    sprintf(buffer,"HiLimen LowLimen"); 
-    SeeedOled.setTextXY(6,0);
+    
+    sprintf(buffer,"<Safe Value<"); 
+    SeeedOled.setTextXY(5,2);
     SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,2);
-    sprintf(buffer,"%d.00",(int)(SystemLimens.DHTTemperature_Hi)); 
-    SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,10);
-    sprintf(buffer,"%d.00",(int)(SystemLimens.DHTTemperature_Low)); 
+    sprintf(buffer,"%2d.0*C",(int)(SystemLimens.DHTTemperature_Low)); 
+    SeeedOled.setTextXY(7,0);
     SeeedOled.putString(buffer); 
+    
+    sprintf(buffer,"%2d.0*C",(int)(SystemLimens.DHTTemperature_Hi)); 
+    SeeedOled.setTextXY(7,10);
+    SeeedOled.putString(buffer);
+
     if(ButtonIndex == 0) {
-        SeeedOled.setTextXY(5,0);
-        SeeedOled.putString("High");
+        sprintf(buffer,"Low<--     High"); 
+        SeeedOled.setTextXY(6,1);
+        SeeedOled.putString(buffer);
         if (digitalRead(ButtonPin) == 1) {
-            Serial.println("BUTTON");
+                      Serial.println("BUTTON");
             if (EncoderFlag == 1) {
                 delay(100);
                 EncoderFlag = 0;
-                switch(EncoderRoateDir) {
-                case Clockwise:
-                    SystemLimens.DHTTemperature_Hi++;
-                    break;
-                case Anticlockwise:
-                    SystemLimens.DHTTemperature_Hi--;
-                    break;
-                default:
-                    break;
-                }
-                if (SystemLimens.DHTTemperature_Hi > 100) {
-                    SystemLimens.DHTTemperature_Hi = 100;
-                }
-                if (SystemLimens.DHTTemperature_Hi <= SystemLimens.DHTTemperature_Low) {
-                    SystemLimens.DHTTemperature_Hi = SystemLimens.DHTTemperature_Low;
-                }
-            } 
-        }
-    } else {
-        SeeedOled.setTextXY(5,0);
-        SeeedOled.putString("Low ");
-        if (digitalRead(ButtonPin) == 1) {
-            Serial.println("BUTTON");
-            if (EncoderFlag == 1) {
-                delay(100);
-                EncoderFlag = 0;
+                UpdateDataFlag  = 1;
                 switch(EncoderRoateDir) {
                 case Clockwise:
                     SystemLimens.DHTTemperature_Low++;
@@ -496,37 +631,60 @@ void DisplayAirTemp()
                 }
             } 
         }
+    } else {
+        sprintf(buffer,"Low     -->High"); 
+        SeeedOled.setTextXY(6,1);
+        SeeedOled.putString(buffer);
+        if (digitalRead(ButtonPin) == 1) {
+            Serial.println("BUTTON");
+            if (EncoderFlag == 1) {
+                delay(100);
+                EncoderFlag = 0;
+                UpdateDataFlag  = 1;
+                switch(EncoderRoateDir) {
+                case Clockwise:
+                    SystemLimens.DHTTemperature_Hi++;
+                    break;
+                case Anticlockwise:
+                    SystemLimens.DHTTemperature_Hi--;
+                    break;
+                default:
+                    break;
+                }
+                if (SystemLimens.DHTTemperature_Hi > 100) {
+                    SystemLimens.DHTTemperature_Hi = 100;
+                }
+                if (SystemLimens.DHTTemperature_Hi <= SystemLimens.DHTTemperature_Low) {
+                    SystemLimens.DHTTemperature_Hi = SystemLimens.DHTTemperature_Low;
+                }
+            }
+        }
     }
 }
 
 void DisplayMoisture() 
 {
-    sprintf(buffer,"Moisture:");
-    SeeedOled.setTextXY(0,0);          //Set the cursor to Xth Page, Yth Column  
+    sprintf(buffer,"Moisture");
+    SeeedOled.setTextXY(1,4);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
 
     sprintf(buffer,"%d.%d%%",(int)(MoisHumidity),(int)((int)(MoisHumidity*100) % 100));
-    SeeedOled.setTextXY(1,5);          //Set the cursor to Xth Page, Yth Column  
+    SeeedOled.setTextXY(2,6);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
    
     
-    SeeedOled.setTextXY(5,0);
-    SeeedOled.putString("Low ");
+    SeeedOled.setTextXY(5,3);
+    SeeedOled.putString("Safe Value");
     
-    sprintf(buffer,"Limen"); 
-    SeeedOled.setTextXY(6,0);
-    SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,2);
-    sprintf(buffer,"%d.00",(int)(SystemLimens.MoisHumidity_Limen)); 
-    
-
-
-    SeeedOled.putString(buffer);   
+    sprintf(buffer,"%d.0%%",(int)(SystemLimens.MoisHumidity_Limen)); 
+    SeeedOled.setTextXY(6,6);
+    SeeedOled.putString(buffer);  
     if (digitalRead(ButtonPin) == 1) {
         Serial.println("BUTTON");
         if (EncoderFlag == 1) {
         delay(100);
         EncoderFlag = 0;
+        UpdateDataFlag  = 1;
         switch(EncoderRoateDir) {
         case Clockwise:
             SystemLimens.MoisHumidity_Limen++;
@@ -564,14 +722,12 @@ void DisplayVolume()
     SeeedOled.setTextXY(2,3);          //Set the cursor to Xth Page, Yth Column  
     SeeedOled.putString(buffer);
 
-    SeeedOled.setTextXY(5,0);
-    SeeedOled.putString("High");
+    SeeedOled.setTextXY(5,2);
+    SeeedOled.putString("Volume Limen");
     
-    sprintf(buffer,"Limen:"); 
-    SeeedOled.setTextXY(6,0);
-    SeeedOled.putString(buffer);
-    SeeedOled.setTextXY(7,2);
     sprintf(buffer,"%2d.%dL",(Volumetemp/10),(Volumetemp%10)); 
+    SeeedOled.setTextXY(6,5);
+
     SeeedOled.putString(buffer);
     
     if (digitalRead(ButtonPin) == 1) {
@@ -579,6 +735,7 @@ void DisplayVolume()
         if (EncoderFlag == 1) {
         delay(100);
         EncoderFlag = 0;
+        UpdateDataFlag  = 1;
         switch(EncoderRoateDir) {
         case Clockwise:
             Volumetemp++;
@@ -631,10 +788,8 @@ void EncoderRotate()
             if(EncoderFlag == 0) {
                 EncoderFlag = 1;
                 if(digitalRead(EncoderPin2) == 1) {
-                    Serial.println("1");
                     EncoderRoateDir = Clockwise;
                 } else {
-                    Serial.println("0");
                     EncoderRoateDir = Anticlockwise;
                 }
            }
@@ -643,4 +798,20 @@ void EncoderRotate()
     } else {
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
