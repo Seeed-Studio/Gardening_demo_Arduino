@@ -73,10 +73,10 @@ struct Limens
 {
     unsigned char UVIndex_Limen       = 9;
     unsigned char DHTHumidity_Hi      = 60;
-    unsigned char DHTHumidity_Low     = 40;
+    unsigned char DHTHumidity_Low     = 0;
     unsigned char DHTTemperature_Hi   = 30;
-    unsigned char DHTTemperature_Low  = 15;
-    unsigned char MoisHumidity_Limen  = 90;
+    unsigned char DHTTemperature_Low  = 0;
+    unsigned char MoisHumidity_Limen  = 0;
     float         WaterVolume         = 0.2;
 };
 typedef struct Limens WorkingLimens;
@@ -163,7 +163,6 @@ void setup()
     
     /* Init Relay      */
     pinMode(RelayPin,OUTPUT);
-    
     /* The First time power on to write the default data to EEPROM */
     if (EEPROM.read(EEPROMAddress) == 0xff) {
         EEPROM.write(EEPROMAddress,0x00);
@@ -337,6 +336,10 @@ void loop()
         case NoWaterWarning:
                 SeeedOled.setTextXY(5,3);
                 SeeedOled.putString("No  Water");
+                if (ButtonFlag == 1) {
+                    ButtonFlag = 0;
+                    // SwitchtoStandbyFlag = 1;
+                }  
             break;
         }
         delay(1000);
@@ -382,6 +385,7 @@ void loop()
                     NoWaterTime = 0;
                     SystemWarning = NoWaterWarning;
                     SwitchtoWarningFlag = 1;
+                    LCDPage = 3;
                 }
                 Volume       += (float)((float)(NbTopsFan) / 73/60);
             } else {
@@ -416,26 +420,28 @@ void loop()
         }
         if (ButtonFlag == 1) {
             ButtonFlag = 0;
-            SwitchtoStandbyFlag = 1;
+            // SwitchtoStandbyFlag = 1;
         }  
         if (SwitchtoStandbyFlag == 1) {
             Volume = 0;
             WorkingStatus = Standby;
             SeeedOled.clearDisplay();
             StartTime = millis();
-            LCDPage = 4;
+            LCDPage = 3;
             SwitchtoStandbyFlag = 0;
             WaterPumpOff();
+            ButtonFlag = 0;
         } 
-        if (SwitchtoWarningFlag == 1) {
-            Volume = 0;
-            SwitchtoWarningFlag = 0;
-            WorkingStatus = Warning;
-            StartTime = millis();
-            WaterPumpOff();
-            SeeedOled.clearDisplay();
-            SeeedOled.setInverseDisplay();
-        }
+       if (SwitchtoWarningFlag == 1) {
+           Volume = 0;
+           SwitchtoWarningFlag = 0;
+           WorkingStatus = Warning;
+           StartTime = millis();
+           WaterPumpOff();
+           SeeedOled.clearDisplay();
+           SeeedOled.setInverseDisplay();
+           ButtonFlag = 0;
+       }
         break;
     default:
         break;
@@ -776,7 +782,13 @@ void StandbytoWatering()
 
 void ButtonClick()
 {
-    ButtonFlag = 1;
+    
+    if(digitalRead(ButtonPin) == 0){
+        delay(10);
+        if(digitalRead(ButtonPin) == 0){
+            ButtonFlag = 1;
+        }
+    }  
 }
 
 
